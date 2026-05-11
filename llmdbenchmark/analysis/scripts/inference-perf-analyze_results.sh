@@ -2,7 +2,7 @@
 
 # Convert results into universal format
 export LLMDBENCH_RUN_EXPERIMENT_CONVERT_RC=0
-for result in $(find $LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR -maxdepth 1 -name 'stage_*.json'); do
+for result in $(find $LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR -maxdepth 1 -name 'stage_*.json' ! -name '*session*'); do
   result_fname=$(echo $result | rev | cut -d '/' -f 1 | rev)
 
   echo "Converting $result_fname to Benchmark Report v0.1"
