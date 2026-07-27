@@ -5,35 +5,48 @@ plan / standup / teardown / run / experiment subcommands.
 """
 
 import argparse
+import getpass
+import json
 import logging
 import os
 import shutil
 import sys
-import json
 import tempfile
 import time
+from datetime import UTC
 from pathlib import Path
 
 import yaml as _yaml
 
-from llmdbenchmark import __version__, __package_name__, __package_home__
-from llmdbenchmark.interface.env import env, env_bool
+from llmdbenchmark import __package_home__, __package_name__, __version__
 from llmdbenchmark.config import config
+from llmdbenchmark.exceptions.exceptions import TemplateError
+from llmdbenchmark.executor.command import CommandExecutor
+from llmdbenchmark.executor.context import ExecutionContext
+from llmdbenchmark.executor.step import Phase
+from llmdbenchmark.executor.step_executor import StepExecutor
+from llmdbenchmark.interface import experiment as experiment_interface
+from llmdbenchmark.interface import plan, results, run, standup, teardown
+from llmdbenchmark.interface import smoketest as smoketest_interface
+from llmdbenchmark.interface.commands import Command
+from llmdbenchmark.interface.env import env, env_bool
 from llmdbenchmark.logging.logger import get_logger
+from llmdbenchmark.parser.cluster_resource_resolver import ClusterResourceResolver
+from llmdbenchmark.parser.render_plans import RenderPlans
+from llmdbenchmark.parser.render_specification import RenderSpecification
+from llmdbenchmark.parser.version_resolver import VersionResolver
+from llmdbenchmark.results_store.store import StoreManager
+from llmdbenchmark.run.steps import get_run_steps
+from llmdbenchmark.smoketests.steps import get_smoketest_steps
+from llmdbenchmark.standup.steps import get_standup_steps
+from llmdbenchmark.teardown.steps import get_teardown_steps
+from llmdbenchmark.telemetry import get_telemetry, init_telemetry
 from llmdbenchmark.utilities.os.filesystem import (
-    create_workspace,
     create_sub_dir_workload,
+    create_workspace,
     get_absolute_path,
     resolve_specification_file,
 )
-from llmdbenchmark.interface.commands import Command
-from llmdbenchmark.results_store.store import StoreManager
-from llmdbenchmark.telemetry import init_telemetry, get_telemetry
-import getpass
-from llmdbenchmark.interface import plan, standup, teardown, run
-from llmdbenchmark.interface import smoketest as smoketest_interface
-from llmdbenchmark.interface import experiment as experiment_interface
-from llmdbenchmark.interface import results
 from llmdbenchmark.parser.cli_overrides import (
     GLOBAL_SELECTOR,
     REDACTED,
@@ -42,26 +55,11 @@ from llmdbenchmark.parser.cli_overrides import (
     is_secret_path,
     parse_cli_overrides,
 )
-from llmdbenchmark.parser.render_specification import RenderSpecification
-from llmdbenchmark.exceptions.exceptions import TemplateError, ConfigurationError
-from llmdbenchmark.parser.render_plans import RenderPlans
-from llmdbenchmark.parser.version_resolver import VersionResolver
-from llmdbenchmark.parser.cluster_resource_resolver import ClusterResourceResolver
-from llmdbenchmark.executor.step import Phase
-from llmdbenchmark.executor.context import ExecutionContext
-from llmdbenchmark.executor.step_executor import StepExecutor
-from llmdbenchmark.standup.steps import get_standup_steps
-from llmdbenchmark.smoketests.steps import get_smoketest_steps
-from llmdbenchmark.teardown.steps import get_teardown_steps
-
-from llmdbenchmark.run.steps import get_run_steps
-from llmdbenchmark.executor.command import CommandExecutor
+from llmdbenchmark.exceptions.exceptions import ConfigurationError
 
 
 class PhaseError(Exception):
     """Raised when a lifecycle phase (standup/run/teardown) fails."""
-
-    pass
 
 
 def setup_workspace(
@@ -137,6 +135,7 @@ def dispatch_cli(args: argparse.Namespace, logger: logging.Logger) -> None:
             cli_model=getattr(args, "models", None) or getattr(args, "model", None),
             cli_methods=getattr(args, "methods", None),
             cli_monitoring=getattr(args, "monitoring", None),
+            cli_prism=getattr(args, "prism", None),
             cli_wva=getattr(args, "wva", False),
             cli_gateway_class=getattr(args, "gateway_class", None),
             cli_stack_filter=_parse_stack_filter(getattr(args, "stack", None)),
@@ -634,8 +633,8 @@ def _check_model_access(context, all_stacks_info, logger):
         return
 
     from llmdbenchmark.utilities.huggingface import (
-        check_model_access,
         GatedStatus,
+        check_model_access,
     )
 
     checked: set[str] = set()
@@ -1081,8 +1080,7 @@ def _print_endpoints_table(context, logger, args) -> None:
         # - trim to the friendly `category/name` form the CLI understands.
         parent = os.path.basename(os.path.dirname(spec)) if "/" in spec else ""
         stem = os.path.basename(spec)
-        if stem.endswith(".yaml.j2"):
-            stem = stem[: -len(".yaml.j2")]
+        stem = stem.removesuffix(".yaml.j2")
         spec = f"{parent}/{stem}" if parent else stem
     namespace = context.namespace or "<namespace>"
     logger.log_info("💡 Copy-paste to benchmark one pool:")
@@ -1207,11 +1205,12 @@ def _store_run_parameters_configmap(context, harness, workload, experiment_ids, 
         if not namespace:
             return
 
+        from datetime import datetime
+
         import yaml as _yaml
-        from datetime import datetime, timezone
 
         cm_name = "llm-d-benchmark-run-parameters"
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
         # Build PVC results paths from experiment IDs
         parallelism = context.harness_parallelism or 1
@@ -1331,6 +1330,7 @@ def _render_plans_for_experiment(args, logger, setup_overrides=None):
         cli_model=getattr(args, "models", None) or getattr(args, "model", None),
         cli_methods=getattr(args, "methods", None),
         cli_monitoring=getattr(args, "monitoring", None),
+        cli_prism=getattr(args, "prism", None),
         cli_wva=getattr(args, "wva", False),
         cli_epp_keda_saturation=getattr(args, "epp_keda_saturation", False),
         cli_gateway_class=getattr(args, "gateway_class", None),
@@ -1348,7 +1348,7 @@ def _render_plans_for_experiment(args, logger, setup_overrides=None):
 
 def _execute_experiment(args, logger):
     """Orchestrate a full DoE experiment: setup x run treatment matrix."""
-    from llmdbenchmark.experiment.parser import parse_experiment, SetupTreatment
+    from llmdbenchmark.experiment.parser import SetupTreatment, parse_experiment
     from llmdbenchmark.experiment.summary import ExperimentSummary
 
     experiment_file = Path(args.experiments)
@@ -1607,6 +1607,7 @@ def _log_env_overrides(logger, args):
         "LLMDBENCH_KUBECONFIG": ("kubeconfig", "--kubeconfig"),
         "LLMDBENCH_PARALLEL": ("parallel", "--parallel"),
         "LLMDBENCH_MONITORING": ("monitoring", "--monitoring"),
+        "LLMDBENCH_PRISM": ("prism", "--prism"),
         "LLMDBENCH_SCENARIO": ("scenario", "--scenario"),
         "LLMDBENCH_DEEP_CLEAN": ("deep", "--deep"),
         "LLMDBENCH_MODEL": ("model", "--model"),
@@ -1710,7 +1711,8 @@ def _all_flag_forms(flag: str) -> list[str]:
         "--release": ["--release", "-r"],
         "--kubeconfig": ["--kubeconfig", "-k"],
         "--parallel": ["--parallel"],
-        "--monitoring": ["--monitoring"],
+        "--monitoring": ["--monitoring", "--no-monitoring"],
+        "--prism": ["--prism", "--no-prism"],
         "--scenario": ["--scenario", "-c"],
         "--deep": ["--deep", "-d"],
         "--model": ["--model", "-m"],
@@ -1960,6 +1962,8 @@ def cli() -> None:
         args.non_admin = env_bool("LLMDBENCH_NON_ADMIN")
     if hasattr(args, "monitoring") and args.monitoring is None:
         args.monitoring = env_bool("LLMDBENCH_MONITORING") or None
+    if hasattr(args, "prism") and args.prism is None:
+        args.prism = env_bool("LLMDBENCH_PRISM") or None
     if hasattr(args, "deep") and not args.deep:
         args.deep = env_bool("LLMDBENCH_DEEP_CLEAN")
     if hasattr(args, "skip") and not args.skip:
