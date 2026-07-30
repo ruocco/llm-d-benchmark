@@ -122,10 +122,12 @@ repos:
             # because the rendered figures are the point.
             docs/analysis/analysis\.ipynb
             |
-            # BenchmarkReport v0.2 example: the single hit is a
+            # BenchmarkReport v0.2 examples: the single hit is a
             # synthetic storage path with a unix timestamp and run
             # identifier. Illustrative reference, not a credential.
             llmdbenchmark/analysis/benchmark_report/br_v0_2_example\.yaml
+            |
+            llmdbenchmark/analysis/benchmark_report/br_v0_2_1_example\.yaml
             |
             # BenchmarkReport README: three hits are 32-hex
             # example uid / cfg_id values in a Python code block

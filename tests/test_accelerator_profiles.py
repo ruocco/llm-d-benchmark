@@ -27,6 +27,14 @@ XPU_GUIDES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_hf_token(monkeypatch):
+    # Renders here assert the token-optional shape; a token in the developer's
+    # shell flips huggingface.enabled on and injects HF_TOKEN into the EPP env.
+    for var in ("HF_TOKEN", "LLMDBENCH_HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def _render(
     tmp_path: Path,
     profile: str,
