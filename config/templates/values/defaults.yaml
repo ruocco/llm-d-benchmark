@@ -121,7 +121,7 @@ _anchors:
   llm-d-inference-sim_version:       &llm-d-inference-sim_version       v0.9.2
   llm-d-benchmark_version:           &llm-d-benchmark_version           v0.7.0
   # llm-d-prism dashboard (in-cluster instance deployed at standup).
-  llm-d-prism_version:               &llm-d-prism_version               latest
+  llm-d-prism_version:               &llm-d-prism_version               dev
 
   # Common labels
   app_label: &app_label llm-d-benchmark-harness
@@ -379,8 +379,8 @@ huggingface:
 #
 images:
   benchmark:
-    repository: ghcr.io/llm-d/llm-d-benchmark
-    tag: *llm-d-benchmark_version
+    repository: quay.io/aruocco/llm-d-benchmark
+    tag: prism-latest
     pullPolicy: *pull_always
     sourceRepo: https://github.com/llm-d/llm-d-benchmark
 
